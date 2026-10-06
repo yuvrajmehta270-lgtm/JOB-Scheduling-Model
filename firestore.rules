@@ -1,0 +1,108 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helper Functions ────────────────────────────────────────────────────
+
+    /** True if the request comes from a signed-in Firebase user. */
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    /** Fetch the role field from the requesting user's profile document. */
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    /** True when the authenticated user is an Administrator. */
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    /** True when the authenticated user is a Manager. */
+    function isManager() {
+      return isAuthenticated() && getUserRole() == 'manager';
+    }
+
+    /** True when the user is an Admin or Manager. */
+    function isAdminOrManager() {
+      return isAdmin() || isManager();
+    }
+
+    // ─── /users/{userId} ────────────────────────────────────────────────────
+    //
+    // • All authenticated users can READ user profiles (needed to populate
+    //   assignee dropdowns and display names).
+    // • Only Admins can CREATE, UPDATE, or DELETE user profile documents.
+    // • Users can update their own profile (non-role, non-status fields only).
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+
+      // Full write: admin only
+      allow create, delete: if isAdmin();
+
+      // Update: admin can change anything; user can update own non-sensitive fields
+      allow update: if isAdmin()
+        || (isAuthenticated()
+            && request.auth.uid == userId
+            && !request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['role', 'status']));
+    }
+
+    // ─── /jobs/{jobId} ──────────────────────────────────────────────────────
+    //
+    // • All authenticated users can read job documents.
+    // • Admins and Managers can create, update, and delete any job.
+    // • Employees can only update the `status`, `notes`, and `updatedAt` fields
+    //   on jobs that are assigned to them.
+
+    match /jobs/{jobId} {
+      allow read: if isAuthenticated();
+
+      allow create: if isAdminOrManager();
+
+      allow delete: if isAdmin();
+
+      allow update: if isAdminOrManager()
+        || (isAuthenticated()
+            && getUserRole() == 'employee'
+            && resource.data.assignedTo == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(['status', 'notes', 'updatedAt']));
+    }
+
+    // ─── /activities/{activityId} ───────────────────────────────────────────
+    //
+    // • All authenticated users can read activity logs.
+    // • Any authenticated user can create an activity log entry.
+    // • No one can update or delete activity logs (immutable audit trail).
+
+    match /activities/{activityId} {
+      allow read:   if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if false;
+    }
+
+    // ─── /notifications/{notifId} ───────────────────────────────────────────
+    //
+    // • Users can only read their own notifications (recipientId == uid).
+    // • Users can update only the `read` field on their own notifications.
+    // • Any authenticated user can create a notification (dispatched by CRUD ops).
+    // • No one can delete notifications.
+
+    match /notifications/{notifId} {
+      allow read:   if isAuthenticated()
+                    && resource.data.recipientId == request.auth.uid;
+
+      allow update: if isAuthenticated()
+                    && resource.data.recipientId == request.auth.uid
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                        .hasOnly(['read']);
+
+      allow create: if isAuthenticated();
+
+      allow delete: if false;
+    }
+  }
+}
